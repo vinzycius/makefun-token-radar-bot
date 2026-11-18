@@ -1,4 +1,4 @@
-// The token radar's model (radar-2): one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model (radar-3): one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and every
 // other pre-token protocol the snapshot ranks: the early rows the radar exists to find. A protocol is
@@ -7,7 +7,7 @@
 // into the ranked board. Say "records no token", never "has no token": the snapshot is a record,
 // not proof.
 //
-// Implied value follows only from the snapshot's own figures, three of them:
+// Implied value follows only from the snapshot's own figures, four of them:
 //
 //   base         = tvl_usd x BASE_MULTIPLE
 //   growth       = change_7d, scored on a LOG scale: g = change_7d / 100,
@@ -15,13 +15,24 @@
 //   growthMult   = 1 + lg x GROWTH_WEIGHT
 //   maturity     = MATURITY_FLOOR + MATURITY_RANGE x (1 - exp(-age_days / MATURITY_SCALE))
 //                  (age_days unknown: UNKNOWN_AGE_DAYS)
-//   implied      = max(1, round(base x growthMult x maturity))
+//   sector       = 1 + SECTOR_WEIGHT x clamp(shrunk sector deviation, +/-SECTOR_DEV_CLAMP)
+//                  (the sector's median log-growth, relative to the field's, shrunk by count)
+//   implied      = max(1, round(base x growthMult x maturity x sector))
 //
 // Why the log scale: a week of +4,448% is a stronger signal than a week of +120%, but it is not
 // thirty-seven times stronger. The log keeps the ordering of extreme growth while stopping one wild
 // week from deciding the board. Why the saturating maturity: a protocol earns most of its maturity
-// credit in its first year with no token; the fifth year adds almost nothing over the third. No
-// protocol name is ever special-cased: the same function scores every row.
+// credit in its first year with no token; the fifth year adds almost nothing over the third.
+//
+// Why a sector term: a launch is worth more when its sector is attracting capital. The sector
+// signal is the median log-growth of the category's own pre-token cohort, measured against the
+// field's median, so it says which sectors are heating up without any single protocol's noise. It
+// uses the median (equal weight), not the TVL-weighted mean, so one giant protocol cannot speak for
+// its whole category; and it is shrunk by count (n / (n + 8)), so a one-protocol category barely
+// moves the needle while a twenty-protocol one is trusted. The term is deliberately small — at most
+// a few percent either way — because the sector is a nudge on the protocol's own figures, never a
+// replacement for them. No protocol name is ever special-cased: the same function scores every row,
+// and the same sector table scores every category.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -56,6 +67,9 @@ export interface ModelConstants {
   maturity_range: number;
   maturity_scale_days: number;
   unknown_age_days: number;
+  sector_weight: number;
+  sector_shrink_k: number;
+  sector_dev_clamp: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -67,10 +81,13 @@ export const MODEL: ModelConstants = {
   maturity_range: 0.35,
   maturity_scale_days: 365,
   unknown_age_days: 365,
+  sector_weight: 1.0,
+  sector_shrink_k: 8,
+  sector_dev_clamp: 0.15,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 40;
@@ -105,6 +122,11 @@ export interface BoardRow {
     growth_multiplier: number;
     maturity_multiplier: number;
     age_days: number | null;
+    sector_multiplier: number;
+    sector_deviation: number;
+    sector_median_growth_pct: number;
+    sector_rank: number;
+    category_tvl_rank: number;
   };
   farm_steps: string[];
 }
@@ -125,7 +147,25 @@ export interface RadarRow {
   growth_log: number;
   growth_multiplier: number;
   maturity_multiplier: number;
+  sector_multiplier: number;
+  sector_deviation: number;
+  sector_median_growth_pct: number;
+  sector_rank: number;
+  category_tvl_rank: number;
   watchlist: boolean;
+}
+
+/** One sector (category) of the ranked universe: its cohort, its momentum, its leader. */
+export interface SectorRow {
+  category: string;
+  count: number;
+  pre_token_tvl_usd: number;
+  median_growth_pct: number;
+  sector_multiplier: number;
+  sector_rank: number;
+  top_slug: string;
+  top_name: string;
+  top_rank: number;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -139,7 +179,7 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
-/** Everything the dashboard needs: the board, the live set, and the model it runs. */
+/** Everything the dashboard needs: the board, the live set, the sectors, and the model it runs. */
 export interface RadarData {
   as_of: string;
   source: string;
@@ -150,7 +190,10 @@ export interface RadarData {
   board_size: number;
   early_size: number;
   live_size: number;
+  overall_median_growth_pct: number;
+  sector_count: number;
   rows: RadarRow[];
+  sectors: SectorRow[];
   live: LiveRow[];
 }
 
@@ -178,19 +221,78 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** The three multipliers and the implied value one protocol gets under `model`. */
-export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants): { implied: number; growthPct: number; growthLog: number; growthMult: number; maturityMult: number; age: number | null } {
+/** A protocol's 7-day growth on the log scale, clamped to the model's bounds. */
+export function logGrowth(protocol: SnapshotProtocol, model: ModelConstants): number {
+  const g = finite(protocol.change_7d, 0) / 100;
+  const raw = g >= 0 ? Math.log(1 + g) : Math.max(g, model.growth_log_floor);
+  return Math.min(model.growth_log_cap, Math.max(model.growth_log_floor, raw));
+}
+
+/** The median of a list of numbers; the lower middle for an even count. */
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = values.slice().sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)]!;
+}
+
+/** One category's sector signal: its median log-growth, its deviation from the field, and the
+ * multiplier the model applies. The deviation is shrunk by count (n / (n + k)) and clamped, so a
+ * one-protocol category barely moves and no sector ever dominates the protocol's own figures. */
+export interface SectorStat {
+  category: string;
+  count: number;
+  median_log: number;
+  deviation: number;
+  shrunk: number;
+  multiplier: number;
+}
+
+/** The sector table for a ranked universe, plus the field's overall median log-growth. */
+export function sectorStats(protocols: SnapshotProtocol[], model: ModelConstants): { overall_median_log: number; stats: Map<string, SectorStat> } {
+  const byCategory = new Map<string, number[]>();
+  const all: number[] = [];
+  for (const p of protocols) {
+    const lg = logGrowth(p, model);
+    all.push(lg);
+    const c = p.category ?? 'Other';
+    const list = byCategory.get(c);
+    if (list === undefined) byCategory.set(c, [lg]);
+    else list.push(lg);
+  }
+  const overall = median(all);
+  const stats = new Map<string, SectorStat>();
+  for (const [category, values] of byCategory) {
+    const med = median(values);
+    const deviation = med - overall;
+    const shrunk = deviation * (values.length / (values.length + model.sector_shrink_k));
+    const clamped = Math.max(-model.sector_dev_clamp, Math.min(model.sector_dev_clamp, shrunk));
+    stats.set(category, {
+      category,
+      count: values.length,
+      median_log: med,
+      deviation,
+      shrunk,
+      multiplier: 1 + clamped * model.sector_weight,
+    });
+  }
+  return { overall_median_log: overall, stats };
+}
+
+/** The four multipliers and the implied value one protocol gets under `model`. */
+export function impliedValue(
+  protocol: SnapshotProtocol,
+  asOf: string,
+  model: ModelConstants,
+  sectorMult: number,
+): { implied: number; growthPct: number; growthLog: number; growthMult: number; maturityMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const rawGrowth = finite(protocol.change_7d, 0);
-  const g = rawGrowth / 100;
-  const rawLog = g >= 0 ? Math.log(1 + g) : Math.max(g, model.growth_log_floor);
-  const growthLog = Math.min(model.growth_log_cap, Math.max(model.growth_log_floor, rawLog));
+  const growthLog = logGrowth(protocol, model);
   const growthMult = 1 + growthLog * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor + model.maturity_range * (1 - Math.exp(-Math.max(ageForModel, 0) / model.maturity_scale_days));
   const base = protocol.tvl_usd * model.base_multiple;
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
-  return { implied, growthPct: rawGrowth, growthLog, growthMult, maturityMult, age };
+  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * sectorMult));
+  return { implied, growthPct: finite(protocol.change_7d, 0), growthLog, growthMult, maturityMult, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -230,13 +332,40 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map((p) => {
-    const { implied, growthPct, growthLog, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model);
-    return { p, implied, growthPct, growthLog, growthMult, maturityMult, age };
+  // The sector table is built from the ranked universe itself, so the sector signal is the cohort's
+  // own momentum, never an outside opinion. Sectors are ranked by multiplier, hottest first.
+  const universe = [...chosen.values()];
+  const { overall_median_log, stats } = sectorStats(universe, model);
+  const sectorRank = new Map<string, number>();
+  [...stats.values()]
+    .sort((a, b) => b.multiplier - a.multiplier || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0))
+    .forEach((s, i) => sectorRank.set(s.category, i + 1));
+
+  const scored = universe.map((p) => {
+    const stat = stats.get(p.category ?? 'Other')!;
+    const { implied, growthPct, growthLog, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model, stat.multiplier);
+    return { p, implied, growthPct, growthLog, growthMult, maturityMult, age, stat };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
-  return scored.map((s, i) => ({
-    rank: i + 1,
+
+  // A row's standing inside its own category (by TVL), and its strongest sibling: the highest-ranked
+  // other protocol in the same category, so the farm plan can pair two launches from one wallet.
+  const ranked = scored.map((s, i) => ({ ...s, rank: i + 1 }));
+  const categoryTvlRank = new Map<string, number>();
+  for (const s of ranked) {
+    const c = s.p.category ?? 'Other';
+    const same = ranked.filter((t) => (t.p.category ?? 'Other') === c).sort((a, b) => b.p.tvl_usd - a.p.tvl_usd);
+    categoryTvlRank.set(s.p.slug, same.findIndex((t) => t.p.slug === s.p.slug) + 1);
+  }
+  const siblingOf = new Map<string, { name: string; rank: number } | null>();
+  for (const s of ranked) {
+    const c = s.p.category ?? 'Other';
+    const sib = ranked.find((t) => t.p.slug !== s.p.slug && (t.p.category ?? 'Other') === c);
+    siblingOf.set(s.p.slug, sib === undefined ? null : { name: sib.p.name, rank: sib.rank });
+  }
+
+  return ranked.map((s) => ({
+    rank: s.rank,
     slug: s.p.slug,
     name: s.p.name,
     category: s.p.category,
@@ -257,12 +386,18 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
       age_days: s.age,
+      sector_multiplier: s.stat.multiplier,
+      sector_deviation: round4(s.stat.shrunk),
+      sector_median_growth_pct: round2((Math.exp(s.stat.median_log) - 1) * 100),
+      sector_rank: sectorRank.get(s.p.category ?? 'Other')!,
+      category_tvl_rank: categoryTvlRank.get(s.p.slug)!,
     },
-    farm_steps: farmSteps(s.p, s.age).map(stepText),
+    farm_steps: farmSteps(s.p, s.age, siblingOf.get(s.p.slug) ?? null).map(stepText),
   }));
 }
 
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
+const round2 = (n: number): number => Math.round(n * 1e2) / 1e2;
 
 /** A step as one string: its action, then its cost and time, within the gate's 20..600 characters. */
 export function stepText(step: FarmStep): string {
@@ -325,6 +460,12 @@ export const ACTION_RULES: ActionRule[] = [
   { match: ['chain'], primary: 'Bridge ${capital} to the chain behind ${name} and use its native apps.', secondary: "Run one transaction a week in the chain's own apps." },
   { match: ['payment'], primary: 'Pay ${capital} through ${name} to a wallet or merchant on ${chain}.', secondary: 'Set up a second, recurring payment through ${name}.' },
   { match: ['governance'], primary: "Lock ${capital} in ${name}'s governance vault on ${chain}.", secondary: 'Vote on one proposal through ${name}.' },
+  { match: ['cedefi'], primary: 'Deposit ${capital} of USDC into ${name} on ${chain} and open the yield position it offers.', secondary: 'Move $25 of the position into a second ${name} product the same week.' },
+  { match: ['liquidity manager'], primary: 'Deposit ${capital} of USDC into a ${name} managed vault on ${chain} and keep the shares.', secondary: 'Rebalance the vault position once, so the wallet shows an active manager.' },
+  { match: ['farm'], primary: 'Deposit ${capital} into a ${name} farm on ${chain} and stake the receipt.', secondary: 'Harvest the farm rewards and compound them back into the same farm.' },
+  { match: ['anchor btc', 'decentralized btc'], primary: 'Deposit ${capital} of BTC-backed collateral through ${name} on ${chain} and mint against it.', secondary: 'Use the minted asset in a lending market on ${chain} the same week.' },
+  { match: ['crypto card'], primary: 'Order the ${name} card and spend ${capital} through it on ${chain}.', secondary: 'Make a second card payment a week later so the wallet shows repeat use.' },
+  { match: ['index'], primary: 'Buy ${capital} of the ${name} index on ${chain} and hold the basket.', secondary: 'Top up the index with $25 a week later.' },
   { match: [], primary: 'Deposit ${capital} of USDC into ${name} on ${chain} and keep the position open.', secondary: 'Make a second, smaller deposit of $25 a week later.' },
 ];
 
@@ -354,17 +495,31 @@ function fill(template: string, capital: number, name: string, chain: string): s
 }
 
 /**
- * A protocol's farm plan: eight steps, each an action with a cost and a time. The plan is derived
- * from the protocol's own record (category, chains, TVL, age), never from a hand-written list of
- * names: the category picks the two actions, the TVL picks the capital, the age picks the hold.
+ * A protocol's farm plan: nine steps, each an action with a cost and a time. The plan is derived
+ * from the protocol's own record (category, chains, TVL, age) and from its standing on the board
+ * (its strongest sibling in the same category), never from a hand-written list of names: the
+ * category picks the two actions, the TVL picks the capital, the age picks the hold, and the board
+ * picks the protocol to pair it with.
  */
-export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
+export function farmSteps(p: SnapshotProtocol, age: number | null, sibling: { name: string; rank: number } | null): FarmStep[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const gas = setupGas(capital);
   const rule = ruleFor(p.category);
   const totalGas = 3 + gas + 3 + 8;
+  const pair: FarmStep =
+    sibling !== null
+      ? {
+          text: `Pair this with ${sibling.name} (rank #${sibling.rank}) — farm both ${p.category ?? 'same-category'} protocols from the same wallet on ${chain}, so one position covers two launches.`,
+          cost: 'about $3 of gas and the same capital',
+          time: '10 minutes',
+        }
+      : {
+          text: `This is the only pre-token ${p.category ?? 'same-category'} protocol on the board, so its launch would be the category's first — keep the position open until it is announced.`,
+          cost: `the $${capital} stays in the position`,
+          time: 'until the launch',
+        };
   return [
     {
       text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.',
@@ -381,6 +536,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       cost: 'about $3 of gas and $25 of capital',
       time: '10 minutes',
     },
+    pair,
     {
       text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.',
       cost: 'about $2 of gas a week',
@@ -443,8 +599,56 @@ export function radarRow(row: BoardRow, watchlist: Set<string>): RadarRow {
     growth_log: row.model.growth_log,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
+    sector_multiplier: row.model.sector_multiplier,
+    sector_deviation: row.model.sector_deviation,
+    sector_median_growth_pct: row.model.sector_median_growth_pct,
+    sector_rank: row.model.sector_rank,
+    category_tvl_rank: row.model.category_tvl_rank,
     watchlist: watchlist.has(row.slug),
   };
+}
+
+/** The sector table for the dashboard: one row per category, hottest sector first. The dashboard
+ * shows the hottest few; every sector still scores, so a protocol's sector rank is among all of
+ * them, not just the ones the panel shows. */
+export function sectorRows(snapshot: Snapshot, board: BoardRow[], model: ModelConstants = MODEL): { sectors: SectorRow[]; overall_median_growth_pct: number } {
+  const index = bySlug(snapshot.protocols);
+  const chosen = new Map<string, SnapshotProtocol>();
+  for (const slug of snapshot.watchlist) {
+    const p = index.get(slug);
+    if (p !== undefined) chosen.set(slug, p);
+  }
+  for (const p of snapshot.protocols) {
+    if (!chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd) chosen.set(p.slug, p);
+  }
+  const universe = [...chosen.values()];
+  const { overall_median_log, stats } = sectorStats(universe, model);
+  const topByCategory = new Map<string, { slug: string; name: string; rank: number }>();
+  for (const r of board) {
+    const c = r.category ?? 'Other';
+    if (!topByCategory.has(c)) topByCategory.set(c, { slug: r.slug, name: r.name, rank: r.rank });
+  }
+  const sectors: SectorRow[] = [...stats.values()]
+    .map((s) => {
+      const top = topByCategory.get(s.category)!;
+      const tvl = universe.filter((p) => (p.category ?? 'Other') === s.category).reduce((sum, p) => sum + p.tvl_usd, 0);
+      return {
+        category: s.category,
+        count: s.count,
+        pre_token_tvl_usd: tvl,
+        median_growth_pct: round2((Math.exp(s.median_log) - 1) * 100),
+        sector_multiplier: round4(s.multiplier),
+        sector_rank: 0,
+        top_slug: top.slug,
+        top_name: top.name,
+        top_rank: top.rank,
+      };
+    })
+    .sort((a, b) => b.sector_multiplier - a.sector_multiplier || b.pre_token_tvl_usd - a.pre_token_tvl_usd);
+  sectors.forEach((s, i) => {
+    s.sector_rank = i + 1;
+  });
+  return { sectors, overall_median_growth_pct: round2((Math.exp(overall_median_log) - 1) * 100) };
 }
 
 /** Everything the dashboard renders, from the snapshot. */
@@ -452,6 +656,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const { sectors, overall_median_growth_pct } = sectorRows(snapshot, board, model);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -462,7 +667,10 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     board_size: board.length,
     early_size: early,
     live_size: live.length,
+    overall_median_growth_pct,
+    sector_count: sectors.length,
     rows: board.map((r) => radarRow(r, new Set(snapshot.watchlist))),
+    sectors,
     live,
   };
   return { board, radar };

@@ -1,11 +1,13 @@
-// Token Radar's dashboard. It reads window.RADAR (written beside dashboard/ by main.ts) and
-// renders the ranked board, a filterable table, a per-protocol detail drawer with the model's own
-// inputs and the protocol's farm plan. No network: every byte it shows is in data.js.
+// Token Radar's dashboard (radar-3). It reads window.RADAR (written beside dashboard/ by main.ts)
+// and renders the ranked board, a sector overview, a filterable table, and a per-protocol detail
+// drawer with the model's own inputs, the sector's momentum, and the protocol's farm plan. No
+// network: every byte it shows is in data.js.
 //
-// Two derivations live here and in lib/model.ts, and they must stay one: the implied value
-// (impliedOf) and the farm plan (farmSteps with the ACTION_RULES table). The page recomputes a row
-// from the snapshot figures and checks the number board.json carries, so the page's code and the
-// board's data are visibly the same arithmetic. If you change one, change both.
+// Three derivations live here and in lib/model.ts, and they must stay one: the implied value
+// (impliedOf), the sector table (the sectors array data.js carries), and the farm plan (farmSteps
+// with the ACTION_RULES table). The page recomputes a row from the snapshot figures and checks the
+// number board.json carries, so the page's code and the board's data are visibly the same
+// arithmetic. If you change one, change both.
 (function () {
   'use strict';
 
@@ -31,9 +33,18 @@
     if (days >= 365) return (days / 365).toFixed(1) + 'y';
     return Math.max(0, Math.round(days)) + 'd';
   }
+  function ordinal(n) {
+    if (n % 100 >= 11 && n % 100 <= 13) return n + 'th';
+    if (n % 10 === 1) return n + 'st';
+    if (n % 10 === 2) return n + 'nd';
+    if (n % 10 === 3) return n + 'rd';
+    return n + 'th';
+  }
 
-  // The model in one function: growth on a log scale, maturity saturating with age. The same
-  // function scores every protocol in lib/model.ts; this copy lets the page check board.json.
+  // The model in one function: growth on a log scale, maturity saturating with age, and the sector
+  // multiplier the row carries (its category's median log-growth against the field's, shrunk by
+  // count). The same function scores every protocol in lib/model.ts; this copy lets the page check
+  // board.json.
   function impliedOf(row, model) {
     var g = (row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d) / 100;
     var rawLog = g >= 0 ? Math.log(1 + g) : Math.max(g, model.growth_log_floor);
@@ -41,7 +52,8 @@
     var growthMult = 1 + growthLog * model.growth_weight;
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + model.maturity_range * (1 - Math.exp(-Math.max(age, 0) / model.maturity_scale_days));
-    return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthMult * maturity));
+    var sector = row.sector_multiplier === null || row.sector_multiplier === undefined ? 1 : row.sector_multiplier;
+    return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthMult * maturity * sector));
   }
 
   function el(tag, attrs) {
@@ -66,9 +78,9 @@
   }
 
   // The farm plan is the same derivation main.ts writes to board.json: the category picks the two
-  // actions, the TVL picks the capital, the age picks the hold. No name is special-cased.
-  // ACTION_RULES is in first-match order; the last rule is the default. Keep this table identical
-  // to lib/model.ts's ACTION_RULES.
+  // actions, the TVL picks the capital, the age picks the hold, and the board picks the protocol to
+  // pair it with. No name is special-cased. ACTION_RULES is in first-match order; the last rule is
+  // the default. Keep this table identical to lib/model.ts's ACTION_RULES.
   var ACTION_RULES = [
     { match: ['lend', 'cdp', 'collateral'], primary: 'Supply ${capital} of USDC to ${name} on ${chain} and keep the position open.', secondary: 'Borrow $25 against the supply and repay it within the same week.' },
     { match: ['dex'], primary: "Provide ${capital} of liquidity to ${name}'s main pool on ${chain} and keep the position open.", secondary: "Swap $25 through ${name}'s main pool so the wallet shows both sides of the market." },
@@ -84,6 +96,12 @@
     { match: ['chain'], primary: 'Bridge ${capital} to the chain behind ${name} and use its native apps.', secondary: "Run one transaction a week in the chain's own apps." },
     { match: ['payment'], primary: 'Pay ${capital} through ${name} to a wallet or merchant on ${chain}.', secondary: 'Set up a second, recurring payment through ${name}.' },
     { match: ['governance'], primary: "Lock ${capital} in ${name}'s governance vault on ${chain}.", secondary: 'Vote on one proposal through ${name}.' },
+    { match: ['cedefi'], primary: 'Deposit ${capital} of USDC into ${name} on ${chain} and open the yield position it offers.', secondary: 'Move $25 of the position into a second ${name} product the same week.' },
+    { match: ['liquidity manager'], primary: 'Deposit ${capital} of USDC into a ${name} managed vault on ${chain} and keep the shares.', secondary: 'Rebalance the vault position once, so the wallet shows an active manager.' },
+    { match: ['farm'], primary: 'Deposit ${capital} into a ${name} farm on ${chain} and stake the receipt.', secondary: 'Harvest the farm rewards and compound them back into the same farm.' },
+    { match: ['anchor btc', 'decentralized btc'], primary: 'Deposit ${capital} of BTC-backed collateral through ${name} on ${chain} and mint against it.', secondary: 'Use the minted asset in a lending market on ${chain} the same week.' },
+    { match: ['crypto card'], primary: 'Order the ${name} card and spend ${capital} through it on ${chain}.', secondary: 'Make a second card payment a week later so the wallet shows repeat use.' },
+    { match: ['index'], primary: 'Buy ${capital} of the ${name} index on ${chain} and hold the basket.', secondary: 'Top up the index with $25 a week later.' },
     { match: [], primary: 'Deposit ${capital} of USDC into ${name} on ${chain} and keep the position open.', secondary: 'Make a second, smaller deposit of $25 a week later.' }
   ];
   // Whether `needle` occurs in `hay` at a word boundary (the start, or after a non-letter), so
@@ -126,6 +144,17 @@
     if (s.length < 20) s = s + " Hold the position and check the protocol's own page.";
     return s;
   }
+  // The strongest sibling: the highest-ranked other protocol in the same category. DATA.rows is
+  // already in board order, so the first other row in the category is the sibling. The same
+  // derivation runs in lib/model.ts, so the page's plan and board.json's are one plan.
+  function siblingOf(p) {
+    var sib = null;
+    for (var i = 0; i < DATA.rows.length; i++) {
+      var r = DATA.rows[i];
+      if (r.slug !== p.slug && (r.category || 'Other') === (p.category || 'Other')) { sib = r; break; }
+    }
+    return sib === null ? null : { name: sib.name, rank: sib.rank };
+  }
   function farmSteps(p) {
     var chain = chainOf(p);
     var capital = capitalFor(p);
@@ -133,10 +162,15 @@
     var gas = capital >= 150 ? 8 : 4;
     var rule = ruleFor(p.category);
     var totalGas = 3 + gas + 3 + 8;
+    var sibling = siblingOf(p);
+    var pair = sibling !== null
+      ? { text: 'Pair this with ' + sibling.name + ' (rank #' + sibling.rank + ') — farm both ' + (p.category || 'same-category') + ' protocols from the same wallet on ' + chain + ', so one position covers two launches.', cost: 'about $3 of gas and the same capital', time: '10 minutes' }
+      : { text: 'This is the only pre-token ' + (p.category || 'same-category') + ' protocol on the board, so its launch would be the category\'s first — keep the position open until it is announced.', cost: 'the $' + capital + ' stays in the position', time: 'until the launch' };
     return [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
       { text: fill(rule.primary, capital, p.name, chain), cost: '$' + capital + ' of capital and about $' + gas + ' of gas', time: '15 minutes to set up' },
       { text: fill(rule.secondary, capital, p.name, chain), cost: 'about $3 of gas and $25 of capital', time: '10 minutes' },
+      pair,
       { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
       { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
       { text: "Before you withdraw, open the protocol's own points or rewards page and check the wallet is counted; claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
@@ -217,6 +251,53 @@
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Early rows below the floor' }), el('b', { text: String(DATA.early_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) }))
+      )
+    );
+  }
+
+  // The sector overview: which categories are heating up. Each sector is its pre-token cohort's
+  // median 7-day growth against the field's, so the table is the model's thesis in one glance:
+  // the sectors at the top are where the next launches are most likely to be worth farming.
+  // Selecting a sector filters the board to it. The panel shows the hottest six; every sector
+  // still scores, so a row's sector rank is among all of them.
+  function sectorPanel() {
+    var sectors = (DATA.sectors || []).slice(0, 6);
+    if (sectors.length === 0) return null;
+    var tbody = el('tbody');
+    sectors.forEach(function (s) {
+      var multClass = s.sector_multiplier >= 1 ? 'pos' : 'neg';
+      var tr = el('tr', {
+        tabindex: '0',
+        onclick: function () { state.category = s.category; state.tab = 'pre-token'; writeHash(); render(); },
+        onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); state.category = s.category; state.tab = 'pre-token'; writeHash(); render(); } }
+      },
+        el('td', { class: 'rank-num', text: String(s.sector_rank) }),
+        el('td', null, el('div', { class: 'name' }, el('b', { text: s.category }), el('span', { class: 'sub', text: s.count + ' pre-token protocols' }))),
+        el('td', { class: 'num', text: fmtUsd(s.pre_token_tvl_usd) }),
+        el('td', { class: 'num ' + (s.median_growth_pct >= 0 ? 'pos' : 'neg'), text: fmtPct(s.median_growth_pct) }),
+        el('td', { class: 'num ' + multClass, text: 'x' + s.sector_multiplier.toFixed(3) }),
+        el('td', null, el('div', { class: 'name' }, el('b', { text: s.top_name }), el('span', { class: 'sub', text: 'rank #' + s.top_rank })))
+      );
+      tbody.appendChild(tr);
+    });
+    return el('section', { class: 'panel sectors' },
+      el('div', { class: 'panel-head' },
+        el('h2', { text: 'Sectors heating up' }),
+        el('p', { class: 'sub', text: 'Median 7-day growth of each sector\'s pre-token cohort against the field\'s ' + fmtPct(DATA.overall_median_growth_pct) + '. A sector above the field lifts every protocol in it; a sector below it trims them. Select a sector to filter the board.' })
+      ),
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('caption', { class: 'sub', text: 'The hottest six sectors by sector multiplier. The multiplier is 1 plus the shrunk deviation of the sector\'s median growth from the field, so a one-protocol sector barely moves.' }),
+          el('thead', null, el('tr', null,
+            el('th', { scope: 'col', text: 'Sector' }),
+            el('th', { scope: 'col', text: 'Category' }),
+            el('th', { scope: 'col', text: 'Pre-token TVL' }),
+            el('th', { scope: 'col', text: 'Median 7d' }),
+            el('th', { scope: 'col', text: 'Multiplier' }),
+            el('th', { scope: 'col', text: 'Top protocol' })
+          )),
+          tbody
+        )
       )
     );
   }
@@ -343,10 +424,11 @@
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x ' + m.base_multiple + ' x (1 + log_growth x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + ' + m.maturity_range + ' x (1 - exp(-age_days / ' + m.maturity_scale_days + '))) )\n' +
-        'log_growth = clamp( change_7d >= 0 ? ln(1 + change_7d/100) : max(change_7d/100, ' + m.growth_log_floor + '), ' + m.growth_log_floor + ', ' + m.growth_log_cap + ' )'
+        'implied = round( tvl_usd x ' + m.base_multiple + ' x (1 + log_growth x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + ' + m.maturity_range + ' x (1 - exp(-age_days / ' + m.maturity_scale_days + '))) x sector )\n' +
+        'log_growth = clamp( change_7d >= 0 ? ln(1 + change_7d/100) : max(change_7d/100, ' + m.growth_log_floor + '), ' + m.growth_log_floor + ', ' + m.growth_log_cap + ' )\n' +
+        'sector = 1 + ' + m.sector_weight + ' x clamp( (sector median log_growth - field median log_growth) x n / (n + ' + m.sector_shrink_k + '), -' + m.sector_dev_clamp + ', ' + m.sector_dev_clamp + ' )'
       ),
-      el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Growth is scored on a log scale, so a week of +4,000% counts more than a week of +100%, but not forty times more. Age is the time since the protocol was first listed, the best record of how long it has run with no token; a protocol earns most of its maturity credit in its first year, and an unlisted age uses ' + m.unknown_age_days + ' days. The early radar is every pre-token protocol below the watchlist floor, and the live-token protocols are set aside with their market caps shown.' })
+      el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Growth is scored on a log scale, so a week of +4,000% counts more than a week of +100%, but not forty times more. Age is the time since the protocol was first listed, the best record of how long it has run with no token; a protocol earns most of its maturity credit in its first year, and an unlisted age uses ' + m.unknown_age_days + ' days. The sector term is the median growth of the protocol\'s own category against the field\'s ' + fmtPct(DATA.overall_median_growth_pct) + ': a sector gaining faster than the field lifts every protocol in it, and a sector lagging trims them. The median is equal-weight, so one giant protocol cannot speak for its category, and the deviation is shrunk by count, so a one-protocol sector barely moves. The early radar is every pre-token protocol below the watchlist floor, and the live-token protocols are set aside with their market caps shown.' })
     );
   }
 
@@ -361,6 +443,8 @@
     dialog.textContent = '';
     var steps = farmSteps(row);
     var recomputed = impliedOf(row, DATA.model);
+    var sector = (DATA.sectors || []).filter(function (s) { return s.category === (row.category || 'Other'); })[0];
+    var why = 'Rank #' + row.rank + ' of ' + DATA.board_size + '. ' + row.name + ' is the ' + ordinal(row.category_tvl_rank || 1) + ' largest pre-token ' + (row.category || 'Other') + ' protocol on the board by TVL. Its sector\'s median 7-day growth is ' + fmtPct(row.sector_median_growth_pct) + ' against the field\'s ' + fmtPct(DATA.overall_median_growth_pct) + ', giving a sector multiplier of x' + (row.sector_multiplier || 1).toFixed(3) + ' (sector #' + (row.sector_rank || 0) + ' of ' + DATA.sector_count + '). Its own week is ' + fmtPct(row.change_7d) + ', and it has run ' + fmtAge(row.age_days) + ' with no token on record.';
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
         el('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size + (row.watchlist ? ' - watchlist' : '') }),
@@ -368,6 +452,10 @@
         el('p', { class: 'sub', text: (row.category || 'Other') + ' on ' + (row.chains && row.chains.length ? row.chains.join(', ') : 'an unnamed chain') })
       ),
       el('button', { class: 'close', type: 'button', 'aria-label': 'Close details', text: 'Close', onclick: function () { dialog.close(); } })
+    ));
+    dialog.appendChild(el('section', { class: 'detail-section' },
+      el('h3', { text: 'Why this rank' }),
+      el('p', { class: 'why', text: why })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Implied value' }),
@@ -378,10 +466,26 @@
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
+        el('div', null, el('span', { text: 'Sector multiplier' }), el('b', { class: 'num', text: 'x' + (row.sector_multiplier || 1).toFixed(3) })),
+        el('div', null, el('span', { text: 'Sector median growth' }), el('b', { class: 'num', text: fmtPct(row.sector_median_growth_pct) })),
+        el('div', null, el('span', { text: 'Sector rank' }), el('b', { class: 'num', text: '#' + (row.sector_rank || 0) + ' of ' + DATA.sector_count })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
+    if (sector) {
+      dialog.appendChild(el('section', { class: 'detail-section' },
+        el('h3', { text: 'Its sector: ' + sector.category }),
+        el('div', { class: 'equation' },
+          el('div', null, el('span', { text: 'Pre-token protocols' }), el('b', { class: 'num', text: String(sector.count) })),
+          el('div', null, el('span', { text: 'Pre-token TVL' }), el('b', { class: 'num', text: fmtUsd(sector.pre_token_tvl_usd) })),
+          el('div', null, el('span', { text: 'Median 7-day growth' }), el('b', { class: 'num', text: fmtPct(sector.median_growth_pct) })),
+          el('div', null, el('span', { text: 'Sector multiplier' }), el('b', { class: 'num', text: 'x' + sector.sector_multiplier.toFixed(3) })),
+          el('div', null, el('span', { text: 'Sector leader' }), el('b', { class: 'num', text: sector.top_name + ' (#' + sector.top_rank + ')' }))
+        ),
+        el('p', { class: 'sub', text: 'The sector multiplier comes from this cohort: its median growth against the field, shrunk by how many protocols it counts. Select the sector in the board to see its whole cohort.' })
+      ));
+    }
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
       el('ol', { class: 'steps' }, steps.map(function (s) {
@@ -403,6 +507,10 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    if (state.tab === 'pre-token') {
+      var sectors = sectorPanel();
+      if (sectors) shell.appendChild(sectors);
+    }
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());

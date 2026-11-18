@@ -1,10 +1,15 @@
 // Token Radar's entrypoint (Node 22, standard library only).
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores
-// every rankable pre-token protocol with the radar-2 model in lib/model.ts, writes the ranked board
+// every rankable pre-token protocol with the radar-3 model in lib/model.ts, writes the ranked board
 // to /output/board.json, writes the dashboard's data beside the page as /output/data.js, copies this
 // repository's dashboard/ and screenshots/ to /output, and writes /output/dossier.json with the
 // vendored make.fun library, so the judge reads exactly what this program wrote.
+//
+// The radar-3 model scores each protocol from the snapshot's own figures — TVL, seven-day growth on
+// a log scale, time with no token on a saturating curve, and its sector's median growth against the
+// field — and the dashboard shows the sector table, the per-row breakdown, and a farm plan that
+// pairs each protocol with its strongest sibling in the same category.
 //
 // The dashboard is a static page, no framework and no network: dashboard/index.html, app.css and
 // app.js read /output/data.js, which this program writes from the same board, and the page
@@ -82,7 +87,8 @@ for (const name of shots) {
   }
 }
 
-// The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
+// The dossier is written last: the scorer rebuilds it from this /output and compares bytes, so
+// every file above — board, data, dashboard, screenshots — must already be in place.
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
 
 process.stdout.write(

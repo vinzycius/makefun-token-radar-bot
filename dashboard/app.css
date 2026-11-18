@@ -71,6 +71,16 @@ a { color: var(--accent); }
 .fact b { font-family: var(--font-num); font-size: 15px; font-weight: 600; }
 .fact span { color: var(--muted); font-size: 13px; }
 
+/* Sector overview: the model's thesis in one table, hottest sector first. Rows are buttons: a
+   sector filters the board to its own cohort. */
+.sectors { margin-bottom: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
+.panel-head { display: grid; gap: var(--step-1); }
+.panel-head p { max-width: 78ch; }
+.sectors .table-wrap { border: 1px solid var(--border); border-radius: var(--radius-control); overflow: hidden; }
+.sectors table { font-size: 13px; }
+.sectors th, .sectors td { padding: var(--step-2) var(--step-3); }
+.sectors tbody tr { cursor: pointer; }
+
 .controls { display: flex; flex-wrap: wrap; align-items: end; gap: var(--step-3); padding: var(--step-4) 0; border-top: 1px solid var(--border); }
 .field { display: grid; gap: var(--step-1); }
 .field label { color: var(--muted); font-size: 12px; }
@@ -133,6 +143,7 @@ tbody tr[data-selected="true"] { background: var(--accent-soft); }
 .detail .sub { margin-top: var(--step-1); }
 .detail-section { margin-top: var(--step-5); padding-top: var(--step-4); border-top: 1px solid var(--border); }
 .detail-section h3 { margin-bottom: var(--step-2); }
+.why { font-size: 14px; line-height: 1.6; }
 .equation { display: grid; gap: var(--step-2); font-family: var(--font-num); font-size: 13px; }
 .equation div { display: flex; justify-content: space-between; gap: var(--step-3); }
 .equation span { color: var(--muted); }
