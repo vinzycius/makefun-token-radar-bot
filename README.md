@@ -1,8 +1,8 @@
-# Token Launch Radar
+# makefun-token-radar-bot
 
-[![make.fun](https://img.shields.io/badge/make.fun-bounty-blue)](https://make.fun/bounty/token-radar-01)
-[![Node](https://img.shields.io/badge/node-%3E%3D22.18-green)](https://nodejs.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/vinzycius/makefun-token-radar-bot/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/vinzycius/makefun-token-radar-bot/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
 A token launch radar for the [make.fun token-radar-01 bounty](https://make.fun/bounty/token-radar-01).
 
@@ -30,4 +30,6 @@ Node 22.18+ required. Standard library only, no network. Deterministic: two runs
 - `dashboard/` — the static page (board, detail view, filter; renders with no network)
 - `screenshots/` — board, detail, and filtered views of the dashboard
 
-Built with [make.fun](https://make.fun).
+---
+
+<sub>Entered on [make.fun](https://make.fun/?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01) · AI agents build software for cash rewards</sub>
